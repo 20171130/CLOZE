@@ -13,17 +13,18 @@ import pdb
 import os
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
-#os.environ["CUDA_VISIBLE_DEVICES"]="0"
-#os.environ["CUDA_VISIBLE_DEVICES"]="2,3,4,5,6,7"
-BATCH_SIZE = 24
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from config import args
+BATCH_SIZE = 3
 UPDATE_INTERVAL= 10
 START_EPOCH = 0
 BLANK_ID = 1035 # bert_uncased for "_"
 MASK_ID = 103 # for BERT
 MAX_LEN = 512
 SEP_TOKEN = 102
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 0
 MODEL_NAME = 'bert-large-uncased'
 
 def loadData(folder, suffix=None):
@@ -42,27 +43,6 @@ def loadData(folder, suffix=None):
                         raise
     print(folder, suffix, len(lst))
     return lst
-
-train_lst = loadData('ELE', 'train') 
-val_lst = loadData('ELE', 'dev')
-test_lst = loadData('ELE', 'test')
-cloth_lst = loadData('CLOTH')
-clean_lst = [] 
-i = 0
-""" remove duplicates"""
-for idx, item in enumerate(cloth_lst):
-    dup = False
-    for j in train_lst+val_lst: # no test from cloth, as expected
-        if item['options'] == j['options']:
-            dup = True
-            break
-    if not dup:
-        clean_lst.append(item)
-
-train_lst = train_lst + clean_lst
-tmp = train_lst[0]
-print("%d from cloth"%len(clean_lst))
-print(tmp)
 
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -182,73 +162,12 @@ class Model(nn.Module):
             option_score = torch.gather(logit, 1, options)
             prediction = torch.argmax(option_score, dim = 1).view(-1)
             return prediction
-        
-with open("train_set", 'rb') as f:
-    train_set = pickle.load(f)
-train_loader = DataLoader(train_set, batch_size = BATCH_SIZE, shuffle = True, collate_fn = collate_fn)
-val_lst = loadData('ELE', 'dev')
-val_set = ClozeDataset(val_lst)
-val_loader = DataLoader(val_set, batch_size = 1, shuffle = False, collate_fn=collate_fn)
-
-model = Model()
-if START_EPOCH > 0:
-    state_dict = torch.load("./CKPT/checkpoint_%d"%(START_EPOCH), map_location='cpu')
-    model.load_state_dict(state_dict['model_dict'])
-model = model.cuda()
-model = nn.DataParallel(model)
-
-
-no_decay = ["bias", "Norm", "norm"]
-grouped_parameters = [
-    {
-        "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) ],
-        "weight_decay": WEIGHT_DECAY,
-    },
-    {
-        "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-        "weight_decay": 0,
-    }
-]
-
-if WEIGHT_DECAY > 0:
-    optimizer = optim.AdamW(grouped_parameters, lr=5e-5) 
-else:
-    optimizer = optim.Adam(model.parameters(), lr=5e-5)
-
-writer = SummaryWriter()
-
-for epoch in range(START_EPOCH, 20):
-    model.train()
-    for i, data in enumerate(tqdm(train_loader)):
-        article, options, answers = data['article'].cuda(), data['options'].cuda(), data['answers'].cuda()
-        loss = model(article, options, answers)
-        loss = loss.mean()
-        loss.backward()
-        if i % UPDATE_INTERVAL is 0:
-            optimizer.step()
-            optimizer.zero_grad()
-        writer.add_scalar('loss', loss.item(), i*BATCH_SIZE+epoch*len(train_set)) 
-        
-    model.eval()
-    correct = 0.
-    total = 0.
-    with torch.no_grad():
-        for data in tqdm(val_loader):
-            article, options, answers = data['article'].cuda(), data['options'].cuda(), data['answers'].cuda()
-            pred = model.module(article, options)
-            answers = answers.view(-1)
-            answers = torch.masked_select(answers, answers>=0)
-            correct += (pred == answers).sum().item()
-            total += pred.shape[0]
-    writer.add_scalar('eval_acc', correct/total, epoch+1)
-    print("epoch %d acc: %f"%(epoch+1, correct/total))
-
-    torch.save({'model_dict': model.module.state_dict(),\
-                'optimizer_dict': optimizer.state_dict(),\
-                'eval_acc': correct/total},\
-               "./CKPT/checkpoint_"+str(epoch+1))
-    
+     
 def test():
+    model = Model()
+    state_dict = torch.load("bak/83.1", map_location='cpu')
+    model.load_state_dict(state_dict['model_dict'])
+    model = model.cuda()
     test_lst = loadData('ELE','test')
     test_set = ClozeDataset(test_lst)
     test_loader = DataLoader(test_set, batch_size = 1, shuffle = False)
@@ -270,3 +189,95 @@ def test():
 
     with open("results.json", "w") as f:
         json.dump(results, f)
+        
+""" training"""
+torch.cuda.set_device(args.local_rank)
+dist.init_process_group("nccl", rank=args.local_rank, world_size=args.world_size)
+train_lst = loadData('ELE', 'train') 
+val_lst = loadData('ELE', 'dev')
+test_lst = loadData('ELE', 'test')
+cloth_lst = loadData('CLOTH')
+clean_lst = [] 
+i = 0
+""" remove duplicates"""
+for idx, item in enumerate(cloth_lst):
+    dup = False
+    for j in train_lst+val_lst: # no test from cloth, as expected
+        if item['options'] == j['options']:
+            dup = True
+            break
+    if not dup:
+        clean_lst.append(item)
+
+train_lst = train_lst + clean_lst
+tmp = train_lst[0]
+print("%d from cloth"%len(clean_lst))
+print(tmp)
+
+with open("train_set", 'rb') as f:
+    train_set = pickle.load(f)
+train_loader = DataLoader(train_set, batch_size = BATCH_SIZE, shuffle = True, collate_fn = collate_fn)
+val_lst = loadData('ELE', 'dev')
+val_set = ClozeDataset(val_lst)
+val_loader = DataLoader(val_set, batch_size = 1, shuffle = False, collate_fn=collate_fn)
+
+model = Model()
+if START_EPOCH > 0:
+    state_dict = torch.load("./CKPT/checkpoint_%d"%(START_EPOCH), map_location='cpu')
+    model.load_state_dict(state_dict['model_dict'])
+model = model.to(args.local_rank)
+#model = nn.DataParallel(model)
+model = DDP(model, device_ids=[args.local_rank]) 
+
+no_decay = ["bias", "Norm", "norm"]
+grouped_parameters = [
+    {
+        "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) ],
+        "weight_decay": WEIGHT_DECAY,
+    },
+    {
+        "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+        "weight_decay": 0,
+    }
+]
+
+if WEIGHT_DECAY > 0:
+    optimizer = optim.AdamW(grouped_parameters, lr=5e-5) 
+else:
+    optimizer = optim.Adam(model.parameters(), lr=5e-5)
+
+if args.local_rank is 0:
+    writer = SummaryWriter()
+
+for epoch in range(START_EPOCH, 20):
+    model.train()
+    for i, data in enumerate(tqdm(train_loader)):
+        article, options, answers = data['article'].cuda(), data['options'].cuda(), data['answers'].cuda()
+        loss = model(article, options, answers)
+        loss = loss.mean()
+        loss.backward()
+        if i % UPDATE_INTERVAL is 0:
+            optimizer.step()
+            optimizer.zero_grad()
+            if args.local_rank is 0:
+                writer.add_scalar('loss', loss.item(), i*BATCH_SIZE+epoch*len(train_set)) 
+
+    if args.local_rank is 0:
+        model.eval()
+        correct = 0.
+        total = 0.
+        with torch.no_grad():
+            for data in tqdm(val_loader):
+                article, options, answers = data['article'].cuda(), data['options'].cuda(), data['answers'].cuda()
+                pred = model.module(article, options)
+                answers = answers.view(-1)
+                answers = torch.masked_select(answers, answers>=0)
+                correct += (pred == answers).sum().item()
+                total += pred.shape[0]
+
+            writer.add_scalar('eval_acc', correct/total, epoch+1)
+        print("epoch %d acc: %f"%(epoch+1, correct/total))
+        torch.save({'model_dict': model.module.state_dict(),\
+                    'optimizer_dict': optimizer.state_dict(),\
+                    'eval_acc': correct/total},\
+                   "./CKPT/checkpoint_"+str(epoch+1))
