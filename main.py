@@ -18,7 +18,7 @@ os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
 #os.environ["CUDA_VISIBLE_DEVICES"]="2,3,4,5,6,7"
 BATCH_SIZE = 24
 UPDATE_INTERVAL= 10
-START_EPOCH = 0
+START_EPOCH = 3
 BLANK_ID = 1035 # bert_uncased for "_"
 MASK_ID = 103 # for BERT
 MAX_LEN = 512
@@ -190,14 +190,15 @@ val_set = ClozeDataset(val_lst)
 val_loader = DataLoader(val_set, batch_size = 1, shuffle = False, collate_fn=collate_fn)
 
 model = Model()
+if START_EPOCH > 0:
+    state_dict = torch.load("./CKPT/checkpoint_%d"%(START_EPOCH), map_location='cpu')
+    model.load_state_dict(state_dict['model_dict'])
 model = model.cuda()
 model = nn.DataParallel(model)
-optimizer = optim.Adam(model.parameters(), lr=1e-5)
+optimizer = optim.Adam(model.parameters(), lr=5e-5)
 
 writer = SummaryWriter()
-if START_EPOCH > 0:
-    state_dict = torch.load("./CKPT/checkpoint_%d"%(START_EPOCH))
-    model.module.load_state_dict(state_dict['model_dict'])
+
 for epoch in range(20):
     model.train()
     for i, data in enumerate(tqdm(train_loader)):
@@ -247,7 +248,7 @@ def test():
                 result.append(chr(ord('A')+prediction[j]))
             else:
                 result.append('A')
-        results["test%04d"%i] = result
+        results["test%04d"%(i+1)] = result
 
     with open("results.json", "w") as f:
         json.dump(results, f)
