@@ -18,11 +18,12 @@ os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
 #os.environ["CUDA_VISIBLE_DEVICES"]="2,3,4,5,6,7"
 BATCH_SIZE = 24
 UPDATE_INTERVAL= 10
-START_EPOCH = 3
+START_EPOCH = 0
 BLANK_ID = 1035 # bert_uncased for "_"
 MASK_ID = 103 # for BERT
 MAX_LEN = 512
 SEP_TOKEN = 102
+WEIGHT_DECAY = 1e-4
 MODEL_NAME = 'bert-large-uncased'
 
 def loadData(folder, suffix=None):
@@ -195,11 +196,28 @@ if START_EPOCH > 0:
     model.load_state_dict(state_dict['model_dict'])
 model = model.cuda()
 model = nn.DataParallel(model)
-optimizer = optim.Adam(model.parameters(), lr=5e-5)
+
+
+no_decay = ["bias", "Norm", "norm"]
+grouped_parameters = [
+    {
+        "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) ],
+        "weight_decay": WEIGHT_DECAY,
+    },
+    {
+        "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+        "weight_decay": 0,
+    }
+]
+
+if WEIGHT_DECAY > 0:
+    optimizer = optim.AdamW(grouped_parameters, lr=5e-5) 
+else:
+    optimizer = optim.Adam(model.parameters(), lr=5e-5)
 
 writer = SummaryWriter()
 
-for epoch in range(20):
+for epoch in range(START_EPOCH, 20):
     model.train()
     for i, data in enumerate(tqdm(train_loader)):
         article, options, answers = data['article'].cuda(), data['options'].cuda(), data['answers'].cuda()
@@ -222,13 +240,13 @@ for epoch in range(20):
             answers = torch.masked_select(answers, answers>=0)
             correct += (pred == answers).sum().item()
             total += pred.shape[0]
-    writer.add_scalar('eval_acc', correct/total, epoch+START_EPOCH+1)
-    print("epoch %d acc: %f"%(epoch+START_EPOCH+1, correct/total))
+    writer.add_scalar('eval_acc', correct/total, epoch+1)
+    print("epoch %d acc: %f"%(epoch+1, correct/total))
 
     torch.save({'model_dict': model.module.state_dict(),\
                 'optimizer_dict': optimizer.state_dict(),\
                 'eval_acc': correct/total},\
-               "./CKPT/checkpoint_"+str(epoch+START_EPOCH+1))
+               "./CKPT/checkpoint_"+str(epoch+1))
     
 def test():
     test_lst = loadData('ELE','test')
