@@ -31,9 +31,9 @@ def loadData(folder, suffix=None):
     """loads data as nested dicts/lists"""
     lst = []
     for root, dirs, files in os.walk(folder, topdown=False):
-        for name in files:
-            if 'ipynb' in root:
-                continue # jupyter tmp file
+        if 'ipynb' in root:
+            continue # jupyter tmp file
+        for name in sorted(files):
             if suffix is None or suffix in root:
                 name = os.path.join(root, name)
                 with open(name) as f:
@@ -167,7 +167,6 @@ def test():
     model = Model()
     state_dict = torch.load("bak/83.1", map_location='cpu')
     model.load_state_dict(state_dict['model_dict'])
-    model = model.cuda()
     test_lst = loadData('ELE','test')
     test_set = ClozeDataset(test_lst)
     test_loader = DataLoader(test_set, batch_size = 1, shuffle = False)
@@ -196,23 +195,6 @@ dist.init_process_group("nccl", rank=args.local_rank, world_size=args.world_size
 train_lst = loadData('ELE', 'train') 
 val_lst = loadData('ELE', 'dev')
 test_lst = loadData('ELE', 'test')
-cloth_lst = loadData('CLOTH')
-clean_lst = [] 
-i = 0
-""" remove duplicates"""
-for idx, item in enumerate(cloth_lst):
-    dup = False
-    for j in train_lst+val_lst: # no test from cloth, as expected
-        if item['options'] == j['options']:
-            dup = True
-            break
-    if not dup:
-        clean_lst.append(item)
-
-train_lst = train_lst + clean_lst
-tmp = train_lst[0]
-print("%d from cloth"%len(clean_lst))
-print(tmp)
 
 with open("train_set", 'rb') as f:
     train_set = pickle.load(f)
